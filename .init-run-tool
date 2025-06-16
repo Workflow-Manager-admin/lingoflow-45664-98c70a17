@@ -1,0 +1,4 @@
+{
+    "command": "python db_shell.py",
+    "working_directory": "/home/kavia/workspace/code-generation/lingoflow-45664-98c70a17/translationapp_db"
+}
