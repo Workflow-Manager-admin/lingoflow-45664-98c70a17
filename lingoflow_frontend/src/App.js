@@ -2,28 +2,23 @@ import React, { useEffect, useState } from 'react';
 import './App.css';
 
 /**
- * Get language list from backend.
+ * Fetch the language list from the backend.
  * @returns {Promise<Array<{code: string, name: string}>>}
+ *
+ * Returns an array of supported language objects.
  */
 async function fetchLanguages() {
-  try {
-    const resp = await fetch('/languages');
-    if (!resp.ok) throw new Error('Failed to fetch languages');
-    return await resp.json();
-  } catch {
-    // fallback for offline dev/demo
-    return [
-      { code: 'en', name: 'English' },
-      { code: 'es', name: 'Spanish' },
-      { code: 'fr', name: 'French' },
-      { code: 'de', name: 'German' },
-      { code: 'it', name: 'Italian' }
-    ];
+  const resp = await fetch('/languages');
+  if (!resp.ok) {
+    throw new Error('Failed to fetch languages');
   }
+  return await resp.json();
 }
 
 /**
- * Translate text using backend API.
+ * Request translation via backend API.
+ * @param {Object} params - text, source_lang, target_lang
+ * @returns {Promise<Object>} - Translation response from API.
  */
 async function translateText({ text, source_lang, target_lang }) {
   const resp = await fetch('/translate', {
@@ -31,14 +26,46 @@ async function translateText({ text, source_lang, target_lang }) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, source_lang, target_lang }),
   });
-  if (!resp.ok) throw new Error('Network error');
+  if (!resp.ok) {
+    let msg;
+    try {
+      msg = (await resp.json()).error || 'Network error';
+    } catch {
+      msg = 'Network error';
+    }
+    throw new Error(msg);
+  }
   return await resp.json();
+}
+
+/**
+ * Request language detection from backend.
+ * @param {string} text
+ * @returns {Promise<string>} detected language code (or "unknown").
+ */
+async function detectLanguage(text) {
+  const resp = await fetch('/detect-language', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!resp.ok) {
+    let errorMsg = "Detection failed";
+    try {
+      errorMsg = (await resp.json()).error;
+    } catch {}
+    throw new Error(errorMsg);
+  }
+  const data = await resp.json();
+  if (data.language) return data.language;
+  return "unknown";
 }
 
 /**
  * Main app for LingoFlow translation UI.
  */
 function App() {
+  // Application state
   const [languages, setLanguages] = useState([]);
   const [sourceLang, setSourceLang] = useState('auto');
   const [targetLang, setTargetLang] = useState('en');
@@ -46,15 +73,36 @@ function App() {
   const [outputText, setOutputText] = useState('');
   const [detectedLanguage, setDetectedLanguage] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [langsLoading, setLangsLoading] = useState(true);
   const [copySuccess, setCopySuccess] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [detectingLang, setDetectingLang] = useState(false);
 
-  // Load supported languages
+  // Load supported languages from backend on mount
   useEffect(() => {
-    fetchLanguages().then(langs => setLanguages(langs));
+    let active = true;
+    setLangsLoading(true);
+    setErrorMsg('');
+    fetchLanguages()
+      .then(langs => {
+        if (active) {
+          setLanguages(langs);
+          // Default target language to English if available, otherwise first
+          if (!langs.find(l => l.code === targetLang)) {
+            setTargetLang(langs[0]?.code || 'en');
+          }
+        }
+      })
+      .catch(err => {
+        // Could not fetch language list
+        setErrorMsg('Unable to load language list from backend.');
+      })
+      .finally(() => setLangsLoading(false));
+    return () => { active = false; }
+    // eslint-disable-next-line
   }, []);
 
-  // Copy translated text handler
+  // Handle copying the translated text
   function handleCopyClick() {
     if (!outputText) return;
     navigator.clipboard.writeText(outputText);
@@ -62,7 +110,7 @@ function App() {
     setTimeout(() => setCopySuccess(false), 1600);
   }
 
-  // Handle translation
+  // Handler for the translate button/form
   async function handleTranslate(e) {
     e.preventDefault();
     setOutputText('');
@@ -72,36 +120,47 @@ function App() {
       setErrorMsg('Please enter text to translate.');
       return;
     }
+    // Optionally auto-detect source language if requested
     setLoading(true);
     try {
+      let langForDetection = sourceLang;
+      let discoveredLang = null;
+      if (sourceLang === 'auto') {
+        setDetectingLang(true);
+        // Request language detection before translating
+        try {
+          discoveredLang = await detectLanguage(inputText);
+          langForDetection = discoveredLang;
+        } catch (err) {
+          setDetectingLang(false);
+          setErrorMsg("Could not detect source language.");
+          setLoading(false);
+          return;
+        }
+        setDetectingLang(false);
+      }
+      // Make translation request
       const body = {
         text: inputText,
-        source_lang: sourceLang,
+        source_lang: sourceLang === "auto" ? "auto" : sourceLang,
         target_lang: targetLang
       };
       const result = await translateText(body);
       if (result.error) {
-        setErrorMsg(result.error);
         setOutputText('');
-        setDetectedLanguage(result.detected_language);
+        setDetectedLanguage(result.detected_language || discoveredLang || null);
+        setErrorMsg(result.error);
       } else {
         setOutputText(result.translated_text || '');
-        setDetectedLanguage(result.detected_language || (sourceLang === 'auto' ? null : null));
+        // Display detected language if present (used for "auto"), or use the detected one
+        setDetectedLanguage(result.detected_language || discoveredLang || (sourceLang === 'auto' ? null : null));
       }
     } catch (err) {
-      setErrorMsg('Translation failed. Please try again.');
+      setOutputText('');
+      setErrorMsg('Translation failed. ' + (err && err.message ? err.message : "Please try again."));
     }
     setLoading(false);
   }
-
-  // Render language options
-  const langOptions = [
-    ...(sourceLang === 'auto'
-      ? [{ code: 'auto', name: 'Detect language' }]
-      : [{ code: 'auto', name: 'Detect language' }]
-    ),
-    ...languages
-  ];
 
   return (
     <div className="app">
@@ -184,14 +243,17 @@ function App() {
                     color: 'var(--text-color)',
                     background: 'var(--base-dark)',
                   }}
-                  disabled={loading}
+                  disabled={langsLoading || loading}
                 >
                   <option value="auto">Detect language</option>
-                  {languages.map((lang) => (
-                    <option key={lang.code} value={lang.code}>
-                      {lang.name}
-                    </option>
-                  ))}
+                  {langsLoading
+                    ? <option disabled>Loading...</option>
+                    : languages.map((lang) => (
+                        <option key={lang.code} value={lang.code}>
+                          {lang.name}
+                        </option>
+                      ))
+                  }
                 </select>
               </div>
               <div style={{ flex: 1, minWidth: 110 }}>
@@ -211,13 +273,16 @@ function App() {
                     color: 'var(--text-color)',
                     background: 'var(--base-dark)',
                   }}
-                  disabled={loading}
+                  disabled={langsLoading || loading}
                 >
-                  {languages.map((lang) => (
-                    <option key={lang.code} value={lang.code}>
-                      {lang.name}
-                    </option>
-                  ))}
+                  {langsLoading
+                    ? <option disabled>Loading...</option>
+                    : languages.map((lang) => (
+                        <option key={lang.code} value={lang.code}>
+                          {lang.name}
+                        </option>
+                      ))
+                  }
                 </select>
               </div>
             </div>
@@ -252,13 +317,21 @@ function App() {
               </button>
             </div>
 
-            {errorMsg &&
+            {(errorMsg || langsLoading) &&
               <div aria-live="polite" style={{
-                color: '#cf222e',
+                color: langsLoading ? 'var(--base-light)' : '#cf222e',
                 marginTop: 4, textAlign: 'left', fontSize: '1.01rem'
-              }}>{errorMsg}</div>
+              }}>
+                {langsLoading ? 'Loading language list...' : errorMsg}
+              </div>
             }
-
+            {detectingLang &&
+              <div aria-live="polite" style={{
+                color: 'var(--base-light)', fontStyle: "italic", marginTop: 3, fontSize: "0.97rem"
+              }}>
+                Detecting source language...
+              </div>
+            }
           </form>
 
           {/* Output section */}
